@@ -1,6 +1,7 @@
-FROM golang:1.21-alpine AS builder
-
 WORKDIR /app
+
+# Install build dependencies
+RUN apk add --no-cache git ca-certificates
 
 # Copy go mod files
 COPY go.mod go.sum ./
@@ -11,23 +12,21 @@ RUN go mod download
 # Copy source code
 COPY main.go ./
 
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o provisioner .
+# Build the application with static linking
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -a -ldflags '-extldflags "-static"' -o provisioner .
 
-# Final stage
-FROM alpine:latest
+# Final stage - use distroless for smaller, more secure image
+FROM gcr.io/distroless/static-debian12:nonroot
 
-RUN apk --no-cache add ca-certificates
+WORKDIR /app
 
-WORKDIR /root/
-
-# Copy the binary from builder
+# Copy CA certificates and binary from builder
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /app/provisioner .
-
-# Create config directory
-RUN mkdir -p /config
 
 # Set default config path
 ENV CONFIG_PATH=/config/config.json
 
-CMD ["./provisioner"]
+USER nonroot:nonroot
+
+ENTRYPOINT ["/app/provisioner"]

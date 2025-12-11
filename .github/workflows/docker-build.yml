@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: Build and Push Docker Image (AMD64 only)
 
 on:
   push:
@@ -44,22 +44,16 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # Tag with 'latest' on push to main/master
             type=raw,value=latest,enable={{is_default_branch}}
-            # Tag with version on git tags (e.g., v1.0.0 -> 1.0.0)
             type=semver,pattern={{version}}
-            # Tag with major.minor (e.g., v1.0.0 -> 1.0)
             type=semver,pattern={{major}}.{{minor}}
-            # Tag with major version (e.g., v1.0.0 -> 1)
             type=semver,pattern={{major}}
-            # Tag with branch name
             type=ref,event=branch
-            # Tag with PR number for pull requests
             type=ref,event=pr
-            # Tag with commit SHA (short)
             type=sha,prefix={{branch}}-
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -68,13 +62,4 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
-
-      - name: Generate artifact attestation
-        if: github.event_name != 'pull_request'
-        uses: actions/attest-build-provenance@v1
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
-
+          platforms: linux/amd64
