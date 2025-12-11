@@ -1,0 +1,20 @@
+{
+  "root_connection_string": "postgres://postgres:rootpassword@postgres:5432/postgres?sslmode=disable",
+  "databases": [
+    {
+      "database": "app_db",
+      "user": "app_user",
+      "password": "securepassword123"
+    },
+    {
+      "database": "analytics_db",
+      "user": "analytics_user",
+      "password": "analyticspass456"
+    },
+    {
+      "database": "reporting_db",
+      "user": "reporting_user",
+      "password": "reportingpass789"
+    }
+  ]
+}

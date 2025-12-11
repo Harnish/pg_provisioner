@@ -1,0 +1,34 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pg-provisioner
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pg-provisioner
+  template:
+    metadata:
+      labels:
+        app: pg-provisioner
+    spec:
+      containers:
+      - name: provisioner
+        image: pg-provisioner:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: CONFIG_PATH
+          value: /config/config.json
+        - name: WATCH_MODE
+          value: "true"  # Enable watch mode to detect ConfigMap changes
+        volumeMounts:
+        - name: config
+          mountPath: /config
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: pg-provisioner-config
+      restartPolicy: Always

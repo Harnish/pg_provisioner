@@ -1,0 +1,30 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pg-provisioner-job
+  namespace: default
+spec:
+  template:
+    metadata:
+      labels:
+        app: pg-provisioner
+    spec:
+      containers:
+      - name: provisioner
+        image: pg-provisioner:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: CONFIG_PATH
+          value: /config/config.json
+        - name: WATCH_MODE
+          value: "false"  # Run once and exit
+        volumeMounts:
+        - name: config
+          mountPath: /config
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: pg-provisioner-config
+      restartPolicy: OnFailure
