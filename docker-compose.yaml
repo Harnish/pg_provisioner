@@ -17,15 +17,33 @@ services:
       timeout: 5s
       retries: 5
 
+  mariadb:
+    image: mariadb:11
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+    ports:
+      - "3306:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   provisioner:
     build: .
     depends_on:
       postgres:
         condition: service_healthy
+      mariadb:
+        condition: service_healthy
     volumes:
-      - ./config.json:/config/config.json:ro
+      - ./config-multi.json:/config/config.json:ro
     environment:
       CONFIG_PATH: /config/config.json
+      WATCH_MODE: "true"
 
 volumes:
   postgres_data:
+  mariadb_data:

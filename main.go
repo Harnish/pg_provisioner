@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 )
 
@@ -18,9 +20,28 @@ type DatabaseConfig struct {
 	Password string `json:"password"`
 }
 
-type Config struct {
+type DatabaseServer struct {
+	Name                 string           `json:"name"`
 	RootConnectionString string           `json:"root_connection_string"`
 	Databases            []DatabaseConfig `json:"databases"`
+}
+
+type Config struct {
+	Servers []DatabaseServer `json:"servers"`
+}
+
+type DBType int
+
+const (
+	PostgreSQL DBType = iota
+	MariaDB
+)
+
+func detectDBType(connStr string) DBType {
+	if strings.HasPrefix(connStr, "mariadb://") || strings.HasPrefix(connStr, "mysql://") {
+		return MariaDB
+	}
+	return PostgreSQL
 }
 
 func main() {
@@ -109,48 +130,101 @@ func loadConfig() (*Config, error) {
 	}
 
 	// Validate configuration
-	if config.RootConnectionString == "" {
-		return nil, fmt.Errorf("root connection string is required")
+	if len(config.Servers) == 0 {
+		return nil, fmt.Errorf("at least one server configuration is required")
 	}
 
-	if len(config.Databases) == 0 {
-		return nil, fmt.Errorf("at least one database configuration is required")
+	for i, server := range config.Servers {
+		if server.RootConnectionString == "" {
+			return nil, fmt.Errorf("server %d: root connection string is required", i)
+		}
+		if len(server.Databases) == 0 {
+			return nil, fmt.Errorf("server %d (%s): at least one database configuration is required", i, server.Name)
+		}
 	}
 
 	return &config, nil
 }
 
 func processConfig(config *Config) error {
-	// Connect to PostgreSQL as root
-	db, err := connectWithRetry(config.RootConnectionString, 5, 5*time.Second)
-	if err != nil {
-		return fmt.Errorf("failed to connect to PostgreSQL: %w", err)
-	}
-	defer db.Close()
+	// Process each server
+	for serverIdx, server := range config.Servers {
+		serverName := server.Name
+		if serverName == "" {
+			serverName = fmt.Sprintf("Server %d", serverIdx+1)
+		}
 
-	log.Println("Connected to PostgreSQL successfully")
+		log.Printf("========================================")
+		log.Printf("Processing server: %s", serverName)
+		log.Printf("========================================")
 
-	// Process each database configuration
-	for i, dbConfig := range config.Databases {
-		log.Printf("Processing database %d/%d: %s", i+1, len(config.Databases), dbConfig.Database)
+		// Detect database type
+		dbType := detectDBType(server.RootConnectionString)
+		
+		var connStr string
+		if dbType == MariaDB {
+			// Convert mariadb:// to mysql:// for the driver
+			connStr = strings.Replace(server.RootConnectionString, "mariadb://", "mysql://", 1)
+			log.Printf("Detected MariaDB/MySQL connection for %s", serverName)
+		} else {
+			connStr = server.RootConnectionString
+			log.Printf("Detected PostgreSQL connection for %s", serverName)
+		}
 
-		if err := provisionDatabase(db, dbConfig); err != nil {
-			log.Printf("Failed to provision database %s: %v", dbConfig.Database, err)
+		// Connect to database as root
+		var db *sql.DB
+		var err error
+		
+		if dbType == MariaDB {
+			db, err = connectWithRetry("mysql", connStr, 5, 5*time.Second)
+		} else {
+			db, err = connectWithRetry("postgres", connStr, 5, 5*time.Second)
+		}
+		
+		if err != nil {
+			log.Printf("Failed to connect to %s: %v", serverName, err)
+			log.Printf("Skipping server: %s", serverName)
 			continue
 		}
 
-		log.Printf("Successfully provisioned database: %s with user: %s", dbConfig.Database, dbConfig.User)
+		log.Printf("Connected to %s successfully", serverName)
+
+		// Process each database configuration for this server
+		for i, dbConfig := range server.Databases {
+			log.Printf("Processing database %d/%d on %s: %s", i+1, len(server.Databases), serverName, dbConfig.Database)
+
+			if dbType == MariaDB {
+				if err := provisionMariaDB(db, dbConfig); err != nil {
+					log.Printf("Failed to provision database %s on %s: %v", dbConfig.Database, serverName, err)
+					continue
+				}
+			} else {
+				if err := provisionPostgreSQL(db, dbConfig); err != nil {
+					log.Printf("Failed to provision database %s on %s: %v", dbConfig.Database, serverName, err)
+					continue
+				}
+			}
+
+			log.Printf("Successfully provisioned database: %s with user: %s on %s", dbConfig.Database, dbConfig.User, serverName)
+		}
+
+		db.Close()
+		log.Printf("Completed processing server: %s", serverName)
 	}
+
+	log.Printf("========================================")
+	log.Printf("All servers processed")
+	log.Printf("========================================")
 
 	return nil
 }
 
-func connectWithRetry(connStr string, maxRetries int, delay time.Duration) (*sql.DB, error) {
+func connectWithRetry(driverName, connStr string, maxRetries int, delay time.Duration) (*sql.DB, error) {
 	var db *sql.DB
 	var err error
 
 	for i := 0; i < maxRetries; i++ {
-		db, err = sql.Open("postgres", connStr)
+		db, err = sql.Open(driverName, connStr)
 		if err != nil {
 			log.Printf("Attempt %d/%d: Failed to open connection: %v", i+1, maxRetries, err)
 			time.Sleep(delay)
@@ -173,11 +247,11 @@ func connectWithRetry(connStr string, maxRetries int, delay time.Duration) (*sql
 	return nil, fmt.Errorf("failed to connect after %d attempts: %w", maxRetries, err)
 }
 
-func provisionDatabase(db *sql.DB, config DatabaseConfig) error {
+func provisionPostgreSQL(db *sql.DB, config DatabaseConfig) error {
 	ctx := context.Background()
 
 	// Check if user exists
-	userExists, err := checkUserExists(ctx, db, config.User)
+	userExists, err := checkPostgreSQLUserExists(ctx, db, config.User)
 	if err != nil {
 		return fmt.Errorf("failed to check user existence: %w", err)
 	}
@@ -207,7 +281,7 @@ func provisionDatabase(db *sql.DB, config DatabaseConfig) error {
 	}
 
 	// Check if database exists
-	dbExists, err := checkDatabaseExists(ctx, db, config.Database)
+	dbExists, err := checkPostgreSQLDatabaseExists(ctx, db, config.Database)
 	if err != nil {
 		return fmt.Errorf("failed to check database existence: %w", err)
 	}
@@ -248,18 +322,86 @@ func provisionDatabase(db *sql.DB, config DatabaseConfig) error {
 	return nil
 }
 
-func checkUserExists(ctx context.Context, db *sql.DB, username string) (bool, error) {
+func provisionMariaDB(db *sql.DB, config DatabaseConfig) error {
+	ctx := context.Background()
+
+	// Create database if it doesn't exist
+	log.Printf("Creating database if not exists: %s", config.Database)
+	createDbSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci", 
+		config.Database)
+	
+	if _, err := db.ExecContext(ctx, createDbSQL); err != nil {
+		return fmt.Errorf("failed to create database: %w", err)
+	}
+
+	// Check if user exists
+	userExists, err := checkMariaDBUserExists(ctx, db, config.User)
+	if err != nil {
+		return fmt.Errorf("failed to check user existence: %w", err)
+	}
+
+	if !userExists {
+		// Create user
+		log.Printf("Creating user: %s", config.User)
+		createUserSQL := fmt.Sprintf("CREATE USER '%s'@'%%' IDENTIFIED BY '%s'", 
+			escapeString(config.User),
+			escapeString(config.Password))
+		
+		if _, err := db.ExecContext(ctx, createUserSQL); err != nil {
+			return fmt.Errorf("failed to create user: %w", err)
+		}
+		log.Printf("User %s created successfully", config.User)
+	} else {
+		log.Printf("User %s already exists, updating password", config.User)
+		// Update password
+		updatePasswordSQL := fmt.Sprintf("ALTER USER '%s'@'%%' IDENTIFIED BY '%s'", 
+			escapeString(config.User),
+			escapeString(config.Password))
+		
+		if _, err := db.ExecContext(ctx, updatePasswordSQL); err != nil {
+			return fmt.Errorf("failed to update user password: %w", err)
+		}
+		log.Printf("Password updated for user %s", config.User)
+	}
+
+	// Grant all privileges on the database to the user
+	grantSQL := fmt.Sprintf("GRANT ALL PRIVILEGES ON `%s`.* TO '%s'@'%%'", 
+		config.Database,
+		escapeString(config.User))
+	
+	if _, err := db.ExecContext(ctx, grantSQL); err != nil {
+		return fmt.Errorf("failed to grant privileges: %w", err)
+	}
+
+	// Flush privileges
+	if _, err := db.ExecContext(ctx, "FLUSH PRIVILEGES"); err != nil {
+		return fmt.Errorf("failed to flush privileges: %w", err)
+	}
+
+	log.Printf("Granted all privileges on database %s to user %s", config.Database, config.User)
+
+	return nil
+}
+
+func checkPostgreSQLUserExists(ctx context.Context, db *sql.DB, username string) (bool, error) {
 	var exists bool
 	query := "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)"
 	err := db.QueryRowContext(ctx, query, username).Scan(&exists)
 	return exists, err
 }
 
-func checkDatabaseExists(ctx context.Context, db *sql.DB, database string) (bool, error) {
+func checkPostgreSQLDatabaseExists(ctx context.Context, db *sql.DB, database string) (bool, error) {
 	var exists bool
 	query := "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)"
 	err := db.QueryRowContext(ctx, query, database).Scan(&exists)
 	return exists, err
+}
+
+func checkMariaDBUserExists(ctx context.Context, db *sql.DB, username string) (bool, error) {
+	var count int
+	query := "SELECT COUNT(*) FROM mysql.user WHERE user = ? AND host = '%'"
+	err := db.QueryRowContext(ctx, query, username).Scan(&count)
+	return count > 0, err
 }
 
 func quoteIdentifier(s string) string {
